@@ -1,11 +1,13 @@
 
 package com.prince.aiclips
 
+import android.content.ContentValues
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.widget.Toast
+import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -26,6 +28,57 @@ import java.io.File
 
 @OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
+
+    private fun saveToGallery(source: File): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(
+                    MediaStore.Video.Media.DISPLAY_NAME,
+                    "PrinceClip_${System.currentTimeMillis()}.mp4"
+                )
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(
+                    MediaStore.Video.Media.RELATIVE_PATH,
+                    Environment.DIRECTORY_MOVIES + "/Prince AI Clips Pro"
+                )
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+
+            val uri = contentResolver.insert(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                values
+            ) ?: throw Exception("Could not create Gallery file")
+
+            try {
+                contentResolver.openOutputStream(uri)?.use { output ->
+                    source.inputStream().use { input ->
+                        input.copyTo(output)
+                    }
+                } ?: throw Exception("Could not save video")
+
+                val finished = ContentValues().apply {
+                    put(MediaStore.Video.Media.IS_PENDING, 0)
+                }
+                contentResolver.update(uri, finished, null, null)
+
+                return "Saved in Gallery: Movies/Prince AI Clips Pro"
+            } catch (e: Exception) {
+                contentResolver.delete(uri, null, null)
+                throw e
+            }
+        } else {
+            val folder = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                ?: throw Exception("Storage unavailable")
+
+            val destination = File(
+                folder,
+                "PrinceClip_${System.currentTimeMillis()}.mp4"
+            )
+            source.copyTo(destination, overwrite = true)
+            return "Saved in app storage: ${destination.name}"
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -40,7 +93,11 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.GetContent()
                 ) { uri ->
                     selectedVideo = uri
-                    status = if (uri != null) "Video selected" else "No video selected"
+                    status = if (uri != null) {
+                        "Video selected"
+                    } else {
+                        "No video selected"
+                    }
                 }
 
                 Column(
@@ -63,9 +120,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     Spacer(Modifier.height(16.dp))
-
                     Text(status)
-
                     Spacer(Modifier.height(16.dp))
 
                     Button(
@@ -76,10 +131,9 @@ class MainActivity : ComponentActivity() {
                                 val retriever = MediaMetadataRetriever()
                                 retriever.setDataSource(context, uri)
 
-                                val duration = retriever
-                                    .extractMetadata(
-                                        MediaMetadataRetriever.METADATA_KEY_DURATION
-                                    )?.toLongOrNull() ?: 0L
+                                val duration = retriever.extractMetadata(
+                                    MediaMetadataRetriever.METADATA_KEY_DURATION
+                                )?.toLongOrNull() ?: 0L
 
                                 retriever.release()
 
@@ -89,15 +143,9 @@ class MainActivity : ComponentActivity() {
                                 }
 
                                 val clipDuration = minOf(duration, 30_000L)
-
-                                val outputDir =
-                                    context.getExternalFilesDir(
-                                        Environment.DIRECTORY_MOVIES
-                                    ) ?: context.cacheDir
-
                                 val outputFile = File(
-                                    outputDir,
-                                    "PrinceClip_${System.currentTimeMillis()}.mp4"
+                                    cacheDir,
+                                    "PrinceTemp_${System.currentTimeMillis()}.mp4"
                                 )
 
                                 val mediaItem = MediaItem.Builder()
@@ -111,7 +159,7 @@ class MainActivity : ComponentActivity() {
                                     .build()
 
                                 isProcessing = true
-                                status = "Creating your 30-second clip..."
+                                status = "Creating your clip..."
 
                                 val transformer = Transformer.Builder(context)
                                     .addListener(
@@ -120,13 +168,18 @@ class MainActivity : ComponentActivity() {
                                                 composition: Composition,
                                                 result: ExportResult
                                             ) {
-                                                isProcessing = false
-                                                status = "Clip created successfully!"
-                                                Toast.makeText(
-                                                    context,
-                                                    "Saved: ${outputFile.name}",
-                                                    Toast.LENGTH_LONG
-                                                ).show()
+                                                try {
+                                                    val message =
+                                                        this@MainActivity.saveToGallery(
+                                                            outputFile
+                                                        )
+                                                    status = message
+                                                } catch (e: Exception) {
+                                                    status = "Save error: ${e.message}"
+                                                } finally {
+                                                    outputFile.delete()
+                                                    isProcessing = false
+                                                }
                                             }
 
                                             override fun onError(
@@ -134,14 +187,18 @@ class MainActivity : ComponentActivity() {
                                                 result: ExportResult,
                                                 exception: ExportException
                                             ) {
+                                                outputFile.delete()
                                                 isProcessing = false
-                                                status = "Error: ${exception.message}"
+                                                status = "Export error: ${exception.message}"
                                             }
                                         }
                                     )
                                     .build()
 
-                                transformer.start(mediaItem, outputFile.absolutePath)
+                                transformer.start(
+                                    mediaItem,
+                                    outputFile.absolutePath
+                                )
 
                             } catch (e: Exception) {
                                 isProcessing = false
@@ -150,13 +207,14 @@ class MainActivity : ComponentActivity() {
                         },
                         enabled = selectedVideo != null && !isProcessing
                     ) {
-                        Text(if (isProcessing) "Creating..." else "Create Clips")
+                        Text(
+                            if (isProcessing) "Creating..."
+                            else "Create Clips"
+                        )
                     }
-
-                    Spacer(Modifier.height(16.dp))
-                    Text("Output: First 30 seconds of your selected video")
                 }
             }
         }
     }
 }
+
