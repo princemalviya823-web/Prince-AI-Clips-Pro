@@ -1,4 +1,5 @@
 
+
 package com.prince.aiclips
 
 import android.content.ContentValues
@@ -26,57 +27,123 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import java.io.File
 
-@OptIn(UnstableApi::class)
+@UnstableApi
 class MainActivity : ComponentActivity() {
 
-    private fun saveToGallery(source: File): String {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val values = ContentValues().apply {
-                put(
-                    MediaStore.Video.Media.DISPLAY_NAME,
-                    "PrinceClip_${System.currentTimeMillis()}.mp4"
-                )
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+    private fun saveToGallery(file: File, number: Int) {
+        val values = ContentValues().apply {
+            put(
+                MediaStore.Video.Media.DISPLAY_NAME,
+                "PrinceClip_${number}.mp4"
+            )
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+
+            if (Build.VERSION.SDK_INT >= 29) {
                 put(
                     MediaStore.Video.Media.RELATIVE_PATH,
                     Environment.DIRECTORY_MOVIES + "/Prince AI Clips Pro"
                 )
                 put(MediaStore.Video.Media.IS_PENDING, 1)
             }
+        }
 
-            val uri = contentResolver.insert(
-                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                values
-            ) ?: throw Exception("Could not create Gallery file")
+        val uri = contentResolver.insert(
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+            values
+        ) ?: throw Exception("Gallery file creation failed")
 
-            try {
-                contentResolver.openOutputStream(uri)?.use { output ->
-                    source.inputStream().use { input ->
-                        input.copyTo(output)
-                    }
-                } ?: throw Exception("Could not save video")
+        try {
+            contentResolver.openOutputStream(uri)?.use { output ->
+                file.inputStream().use { input ->
+                    input.copyTo(output)
+                }
+            } ?: throw Exception("Could not save video")
 
-                val finished = ContentValues().apply {
+            if (Build.VERSION.SDK_INT >= 29) {
+                val update = ContentValues().apply {
                     put(MediaStore.Video.Media.IS_PENDING, 0)
                 }
-                contentResolver.update(uri, finished, null, null)
-
-                return "Saved in Gallery: Movies/Prince AI Clips Pro"
-            } catch (e: Exception) {
-                contentResolver.delete(uri, null, null)
-                throw e
+                contentResolver.update(uri, update, null, null)
             }
-        } else {
-            val folder = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
-                ?: throw Exception("Storage unavailable")
-
-            val destination = File(
-                folder,
-                "PrinceClip_${System.currentTimeMillis()}.mp4"
-            )
-            source.copyTo(destination, overwrite = true)
-            return "Saved in app storage: ${destination.name}"
+        } catch (e: Exception) {
+            contentResolver.delete(uri, null, null)
+            throw e
         }
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun createClips(
+        uri: Uri,
+        duration: Long,
+        count: Int,
+        progress: (String) -> Unit,
+        finished: (String) -> Unit
+    ) {
+        val clipLength = minOf(60_000L, duration / count)
+        var index = 0
+
+        lateinit var startNext: () -> Unit
+
+        startNext = {
+            if (index >= count) {
+                finished("$count clips saved in Gallery!")
+            } else {
+                val currentIndex = index
+                val startMs = currentIndex * clipLength
+                val endMs = startMs + clipLength
+
+                val output = File(
+                    cacheDir,
+                    "PrinceTemp_${System.currentTimeMillis()}_$currentIndex.mp4"
+                )
+
+                progress("Creating clip ${currentIndex + 1} of $count...")
+
+                val mediaItem = MediaItem.Builder()
+                    .setUri(uri)
+                    .setClippingConfiguration(
+                        MediaItem.ClippingConfiguration.Builder()
+                            .setStartPositionMs(startMs)
+                            .setEndPositionMs(endMs)
+                            .build()
+                    )
+                    .build()
+
+                val transformer = Transformer.Builder(this)
+                    .addListener(
+                        object : Transformer.Listener {
+                            override fun onCompleted(
+                                composition: Composition,
+                                result: ExportResult
+                            ) {
+                                try {
+                                    saveToGallery(output, currentIndex + 1)
+                                    output.delete()
+                                    index++
+                                    startNext()
+                                } catch (e: Exception) {
+                                    output.delete()
+                                    finished("Save error: ${e.message}")
+                                }
+                            }
+
+                            override fun onError(
+                                composition: Composition,
+                                result: ExportResult,
+                                exception: ExportException
+                            ) {
+                                output.delete()
+                                finished("Export error: ${exception.message}")
+                            }
+                        }
+                    )
+                    .build()
+
+                transformer.start(mediaItem, output.absolutePath)
+            }
+        }
+
+        startNext()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -89,7 +156,7 @@ class MainActivity : ComponentActivity() {
                 var status by remember { mutableStateOf("Select a video") }
                 var isProcessing by remember { mutableStateOf(false) }
 
-                val videoPicker = rememberLauncherForActivityResult(
+                val picker = rememberLauncherForActivityResult(
                     ActivityResultContracts.GetContent()
                 ) { uri ->
                     selectedVideo = uri
@@ -113,7 +180,7 @@ class MainActivity : ComponentActivity() {
                     Spacer(Modifier.height(20.dp))
 
                     Button(
-                        onClick = { videoPicker.launch("video/*") },
+                        onClick = { picker.launch("video/*") },
                         enabled = !isProcessing
                     ) {
                         Text("Select Video")
@@ -137,67 +204,33 @@ class MainActivity : ComponentActivity() {
 
                                 retriever.release()
 
-                                if (duration <= 0L) {
-                                    status = "Could not read video duration"
+                                if (duration < 40_000L) {
+                                    status = "Video must be at least 40 seconds"
                                     return@Button
                                 }
 
-                                val clipDuration = minOf(duration, 30_000L)
-                                val outputFile = File(
-                                    cacheDir,
-                                    "PrinceTemp_${System.currentTimeMillis()}.mp4"
+                                val count = minOf(
+                                    23,
+                                    (duration / 40_000L).toInt()
                                 )
 
-                                val mediaItem = MediaItem.Builder()
-                                    .setUri(uri)
-                                    .setClippingConfiguration(
-                                        MediaItem.ClippingConfiguration.Builder()
-                                            .setStartPositionMs(0)
-                                            .setEndPositionMs(clipDuration)
-                                            .build()
-                                    )
-                                    .build()
-
                                 isProcessing = true
-                                status = "Creating your clip..."
 
-                                val transformer = Transformer.Builder(context)
-                                    .addListener(
-                                        object : Transformer.Listener {
-                                            override fun onCompleted(
-                                                composition: Composition,
-                                                result: ExportResult
-                                            ) {
-                                                try {
-                                                    val message =
-                                                        this@MainActivity.saveToGallery(
-                                                            outputFile
-                                                        )
-                                                    status = message
-                                                } catch (e: Exception) {
-                                                    status = "Save error: ${e.message}"
-                                                } finally {
-                                                    outputFile.delete()
-                                                    isProcessing = false
-                                                }
-                                            }
-
-                                            override fun onError(
-                                                composition: Composition,
-                                                result: ExportResult,
-                                                exception: ExportException
-                                            ) {
-                                                outputFile.delete()
-                                                isProcessing = false
-                                                status = "Export error: ${exception.message}"
-                                            }
+                                createClips(
+                                    uri = uri,
+                                    duration = duration,
+                                    count = count,
+                                    progress = { message ->
+                                        runOnUiThread {
+                                            status = message
                                         }
-                                    )
-                                    .build()
-
-                                transformer.start(
-                                    mediaItem,
-                                    outputFile.absolutePath
+                                    },
+                                    finished = { message ->
+                                        runOnUiThread {
+                                            isProcessing = false
+                                            status = message
+                                        }
+                                    }
                                 )
 
                             } catch (e: Exception) {
